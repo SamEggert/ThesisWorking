@@ -1,5 +1,3 @@
-# speaker_separation.py
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,17 +6,8 @@ from resemblyzer import VoiceEncoder
 from resemblyzer.audio import preprocess_wav
 from models.resunet import ResUNet30
 import numpy as np
-
-class SpeakerEncoder:
-    def __init__(self):
-        self.encoder = VoiceEncoder()
-
-    def get_embedding(self, wav):
-        """Get speaker embedding from waveform"""
-        if isinstance(wav, str):
-            wav = preprocess_wav(wav)
-        embed = self.encoder.embed_utterance(wav)
-        return torch.from_numpy(embed).float()
+import torchaudio.transforms as T
+import torch.nn.functional as F
 
 class SpeakerSeparation(pl.LightningModule):
     def __init__(
@@ -27,59 +16,136 @@ class SpeakerSeparation(pl.LightningModule):
     ):
         super().__init__()
 
-        # Initialize separation model
         self.ss_model = ResUNet30(
-            input_channels=1,  # Mono audio input
-            output_channels=1, # Mono audio output
-            condition_size=256 # Size of speaker embeddings
+            input_channels=1,
+            output_channels=1,
+            condition_size=256
         )
 
-        # Initialize speaker encoder
-        self.speaker_encoder = SpeakerEncoder()
+        self.speaker_encoder = VoiceEncoder()
         self.learning_rate = learning_rate
+
+        # Add metrics
+        self.train_step_outputs = []
+        self.validation_step_outputs = []
+
+        # STFT for signal-to-noise ratio calculation
+        self.stft = T.Spectrogram(
+            n_fft=2048,
+            win_length=2048,
+            hop_length=512,
+            power=2
+        )
 
     def forward(self, x):
         return self.ss_model(x)
 
-    def training_step(self, batch_data_dict, batch_idx):
-        """
-        Expected batch_data_dict format:
-        {
-            'mixture': tensor of shape (batch_size, samples),
-            'target': tensor of shape (batch_size, samples),
-            'speaker_wav': tensor of shape (batch_size, samples) or list of paths
+    def _compute_metrics(self, separated, target):
+        # Calculate SNR
+        noise = separated - target
+        signal_power = torch.mean(target ** 2)
+        noise_power = torch.mean(noise ** 2)
+        snr = 10 * torch.log10(signal_power / (noise_power + 1e-10))
+
+        # Calculate SI-SNR (Scale-Invariant Signal-to-Noise Ratio)
+        separated_norm = separated - torch.mean(separated, dim=-1, keepdim=True)
+        target_norm = target - torch.mean(target, dim=-1, keepdim=True)
+
+        # Normalize to zero mean and unit variance
+        separated_norm = separated_norm / (torch.norm(separated_norm, dim=-1, keepdim=True) + 1e-8)
+        target_norm = target_norm / (torch.norm(target_norm, dim=-1, keepdim=True) + 1e-8)
+
+        # SI-SNR calculation
+        s_target = torch.sum(separated_norm * target_norm, dim=-1, keepdim=True) * target_norm
+        e_noise = separated_norm - s_target
+
+        si_snr = 20 * torch.log10(torch.norm(s_target, dim=-1) / (torch.norm(e_noise, dim=-1) + 1e-8))
+
+        # L1 Loss
+        l1_loss = F.l1_loss(separated, target)
+
+        return {
+            'snr': snr.mean(),
+            'si_snr': si_snr.mean(),
+            'l1_loss': l1_loss
         }
-        """
+
+    def _shared_step(self, batch, batch_idx, step_type='train'):
         # Get speaker embeddings
-        if isinstance(batch_data_dict['speaker_wav'][0], str):
-            # If paths are provided
+        if isinstance(batch['speaker_wav'][0], str):
             embeddings = torch.stack([
-                self.speaker_encoder.get_embedding(wav)
-                for wav in batch_data_dict['speaker_wav']
+                torch.from_numpy(self.speaker_encoder.embed_utterance(
+                    preprocess_wav(wav)
+                )).float()
+                for wav in batch['speaker_wav']
             ]).to(self.device)
         else:
-            # If waveforms are provided
             embeddings = torch.stack([
-                self.speaker_encoder.get_embedding(wav.cpu().numpy())
-                for wav in batch_data_dict['speaker_wav']
+                torch.from_numpy(self.speaker_encoder.embed_utterance(
+                    wav.cpu().numpy()
+                )).float()
+                for wav in batch['speaker_wav']
             ]).to(self.device)
 
-        # Prepare input dictionary
+        # Prepare input
         input_dict = {
-            'mixture': batch_data_dict['mixture'].unsqueeze(1),  # Add channel dimension
+            'mixture': batch['mixture'].unsqueeze(1),
             'condition': embeddings,
         }
 
         # Forward pass
-        self.ss_model.train()
         output_dict = self.ss_model(input_dict)
-        separated = output_dict['waveform'].squeeze(1)  # Remove channel dimension
+        separated = output_dict['waveform'].squeeze(1)
 
-        # Calculate loss
-        loss = torch.nn.functional.l1_loss(separated, batch_data_dict['target'])
+        # Calculate metrics
+        metrics = self._compute_metrics(separated, batch['target'])
 
-        self.log('train_loss', loss)
-        return loss
+        # Log all metrics
+        for metric_name, value in metrics.items():
+            self.log(
+                f'{step_type}_{metric_name}',
+                value,
+                on_step=(step_type == 'train'),
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True
+            )
+
+        return metrics
+
+    def training_step(self, batch, batch_idx):
+        metrics = self._shared_step(batch, batch_idx, 'train')
+        self.train_step_outputs.append(metrics)
+        return metrics['l1_loss']
+
+    def validation_step(self, batch, batch_idx):
+        metrics = self._shared_step(batch, batch_idx, 'val')
+        self.validation_step_outputs.append(metrics)
+        return metrics['l1_loss']
+
+    def on_train_epoch_end(self):
+        # Calculate epoch metrics
+        metrics = {
+            'train_epoch_snr': torch.stack([x['snr'] for x in self.train_step_outputs]).mean(),
+            'train_epoch_si_snr': torch.stack([x['si_snr'] for x in self.train_step_outputs]).mean(),
+            'train_epoch_l1_loss': torch.stack([x['l1_loss'] for x in self.train_step_outputs]).mean()
+        }
+
+        # Log epoch metrics
+        self.log_dict(metrics, prog_bar=True)
+        self.train_step_outputs.clear()
+
+    def on_validation_epoch_end(self):
+        # Calculate epoch metrics
+        metrics = {
+            'val_epoch_snr': torch.stack([x['snr'] for x in self.validation_step_outputs]).mean(),
+            'val_epoch_si_snr': torch.stack([x['si_snr'] for x in self.validation_step_outputs]).mean(),
+            'val_epoch_l1_loss': torch.stack([x['l1_loss'] for x in self.validation_step_outputs]).mean()
+        }
+
+        # Log epoch metrics
+        self.log_dict(metrics, prog_bar=True)
+        self.validation_step_outputs.clear()
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(
@@ -90,38 +156,20 @@ class SpeakerSeparation(pl.LightningModule):
             weight_decay=0.0,
             amsgrad=True,
         )
-        return optimizer
 
-    @torch.no_grad()
-    def separate(self, mixture, speaker_wav):
-        """
-        Separate a target speaker from a mixture.
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,
+            patience=5,
+            verbose=True
+        )
 
-        Args:
-            mixture: torch.Tensor of shape (samples,) or path to wav
-            speaker_wav: torch.Tensor of shape (samples,) or path to wav
-
-        Returns:
-            torch.Tensor of shape (samples,)
-        """
-        self.eval()
-
-        # Handle inputs
-        if isinstance(mixture, str):
-            mixture = preprocess_wav(mixture)
-        mixture = torch.from_numpy(mixture).float().to(self.device)
-
-        # Get speaker embedding
-        embedding = self.speaker_encoder.get_embedding(speaker_wav).to(self.device)
-
-        # Prepare input
-        input_dict = {
-            'mixture': mixture.unsqueeze(0).unsqueeze(0),  # Add batch and channel dimensions
-            'condition': embedding.unsqueeze(0)  # Add batch dimension
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val_epoch_l1_loss",
+                "frequency": 1
+            },
         }
-
-        # Separate
-        output_dict = self.ss_model(input_dict)
-        separated = output_dict['waveform'].squeeze()  # Remove batch and channel dimensions
-
-        return separated
