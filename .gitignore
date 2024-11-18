@@ -2,3 +2,4 @@ venv
 audio
 checkpoints
 logs
+test_outputs
