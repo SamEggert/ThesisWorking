@@ -10,10 +10,7 @@ import torchaudio.transforms as T
 import torch.nn.functional as F
 
 class SpeakerSeparation(pl.LightningModule):
-    def __init__(
-        self,
-        learning_rate: float = 1e-3,
-    ):
+    def __init__(self, learning_rate: float = 1e-3):
         super().__init__()
 
         self.ss_model = ResUNet30(
@@ -22,7 +19,9 @@ class SpeakerSeparation(pl.LightningModule):
             condition_size=256
         )
 
-        self.speaker_encoder = VoiceEncoder()
+        # Initialize speaker encoder on CPU explicitly
+        self.speaker_encoder = VoiceEncoder().cpu()
+
         self.learning_rate = learning_rate
 
         # Add metrics
@@ -71,26 +70,36 @@ class SpeakerSeparation(pl.LightningModule):
         }
 
     def _shared_step(self, batch, batch_idx, step_type='train'):
+        # Move the speaker encoder to CPU (since it's having issues with MPS)
+        self.speaker_encoder = self.speaker_encoder.cpu()
+
         # Get speaker embeddings
         if isinstance(batch['speaker_wav'][0], str):
-            embeddings = torch.stack([
-                torch.from_numpy(self.speaker_encoder.embed_utterance(
-                    preprocess_wav(wav)
-                )).float()
-                for wav in batch['speaker_wav']
-            ]).to(self.device)
+            embeddings = []
+            for wav in batch['speaker_wav']:
+                # Process on CPU
+                wav_data = preprocess_wav(wav)
+                # Keep on CPU for embedding
+                with torch.no_grad():
+                    embedding = self.speaker_encoder.embed_utterance(wav_data)
+                # Only move the final embedding to the target device
+                embeddings.append(torch.from_numpy(embedding).float().to(self.device))
+            embeddings = torch.stack(embeddings)
         else:
-            embeddings = torch.stack([
-                torch.from_numpy(self.speaker_encoder.embed_utterance(
-                    wav.cpu().numpy()
-                )).float()
-                for wav in batch['speaker_wav']
-            ]).to(self.device)
+            embeddings = []
+            for wav in batch['speaker_wav']:
+                # Move to CPU for processing
+                wav_cpu = wav.cpu().numpy()
+                with torch.no_grad():
+                    embedding = self.speaker_encoder.embed_utterance(wav_cpu)
+                # Move only the embedding to target device
+                embeddings.append(torch.from_numpy(embedding).float().to(self.device))
+            embeddings = torch.stack(embeddings)
 
-        # Prepare input
+        # Prepare input (everything else should already be on the correct device)
         input_dict = {
-            'mixture': batch['mixture'].unsqueeze(1),
-            'condition': embeddings,
+            'mixture': batch['mixture'].unsqueeze(1).to(self.device),
+            'condition': embeddings.to(self.device),
         }
 
         # Forward pass
@@ -98,9 +107,9 @@ class SpeakerSeparation(pl.LightningModule):
         separated = output_dict['waveform'].squeeze(1)
 
         # Calculate metrics
-        metrics = self._compute_metrics(separated, batch['target'])
+        metrics = self._compute_metrics(separated, batch['target'].to(self.device))
 
-        # Log all metrics
+        # Log metrics
         for metric_name, value in metrics.items():
             self.log(
                 f'{step_type}_{metric_name}',

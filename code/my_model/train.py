@@ -93,14 +93,28 @@ def train_model(
     random.shuffle(sam_voices)
     random.shuffle(bea_voices)
 
-    train_size = int(0.8 * len(sam_voices))
+
+    # Calculate train_size based on the smaller dataset
+    train_size = int(0.8 * min(len(sam_voices), len(bea_voices)))
+
+    # Adjust the split for both datasets
     train_target = sam_voices[:train_size]
-    val_target = sam_voices[train_size:]
+    val_target = sam_voices[train_size:train_size + int(0.2 * len(sam_voices))]
     train_noise = bea_voices[:train_size]
-    val_noise = bea_voices[train_size:]
+    val_noise = bea_voices[train_size:train_size + int(0.2 * len(bea_voices))]
+
+    print("\nDataset splits:")
+    print(f"Total sam voices: {len(sam_voices)}")
+    print(f"Total bea voices: {len(bea_voices)}")
+    print(f"Train size: {train_size}")
+    print(f"Train target: {len(train_target)}")
+    print(f"Val target: {len(val_target)}")
+    print(f"Train noise: {len(train_noise)}")
+    print(f"Val noise: {len(val_noise)}")
 
     print(f"Training on {len(train_target)} samples")
     print(f"Validating on {len(val_target)} samples")
+
 
     # Create datasets and dataloaders
     train_dataset = VoiceSeparationDataset(
@@ -165,6 +179,12 @@ def train_model(
         log_every_n_steps=10,
         val_check_interval=0.5      # Validate twice per epoch
     )
+
+
+    print("trainer:", trainer)
+    print("train loader:", train_loader)
+    print("val loader:", val_loader)
+
 
     # Train model
     trainer.fit(
