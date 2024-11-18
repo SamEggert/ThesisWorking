@@ -129,7 +129,7 @@ def create_mixed_signal(target_wav, noise_wav):
 def main():
     # Define paths
     BASE_DIR = "/Users/samueleggert/GitHub/ThesisWorking/code/my_model"
-    CHECKPOINT_PATH = os.path.join(BASE_DIR, "checkpoints/last.ckpt")
+    CHECKPOINT_PATH = os.path.join(BASE_DIR, "checkpoints/last-v2.ckpt") # checkpoints are variable to change
     SAM_WAV = os.path.join(BASE_DIR, "audio/sam_Neutral/neutral_1-28_0001.wav")
     BEA_WAV = os.path.join(BASE_DIR, "audio/bea_Neutral/Neutral_1-28_0001.wav")
     OUTPUT_DIR = os.path.join(BASE_DIR, "test_outputs")
