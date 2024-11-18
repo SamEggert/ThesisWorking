@@ -121,6 +121,11 @@ class SpeakerSeparation(pl.LightningModule):
                 batch_size=len(batch['mixture'])  # Add this line
             )
 
+        if batch_idx % 10 == 0:
+            torch.cuda.empty_cache()  # For GPU
+            import gc
+            gc.collect()  # For CPU
+
         return metrics
 
     def training_step(self, batch, batch_idx):

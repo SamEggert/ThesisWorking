@@ -153,10 +153,12 @@ def train_model(
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
         filename='{epoch}-{val_epoch_l1_loss:.3f}',
-        save_top_k=3,
-        monitor='val_epoch_l1_loss',  # Change this to match the metric you're logging
+        save_top_k=2,          # Only keep 2 best models
+        monitor='val_epoch_l1_loss',
         mode='min',
-        save_last=True
+        save_last=True,        # Keep last checkpoint
+        every_n_epochs=1,      # Save every epoch
+        auto_insert_metric_name=True
     )
 
     # Set up early stopping
@@ -179,7 +181,10 @@ def train_model(
         callbacks=[checkpoint_callback, early_stop_callback],
         logger=logger,
         log_every_n_steps=10,
-        val_check_interval=0.5      # Validate twice per epoch
+        val_check_interval=0.5,
+        precision=16,  # Use half precision
+        gradient_clip_val=1.0,  # Add gradient clipping
+        accumulate_grad_batches=2  # Accumulate gradients
     )
 
 
@@ -197,12 +202,13 @@ def train_model(
 
 if __name__ == "__main__":
     train_model(
-        train_batch_size=8,
-        val_batch_size=8,
+        train_batch_size=4,  # Reduce from 8
+        val_batch_size=4,    # Reduce from 8
+        num_workers=2,       # Reduce from 4
         num_epochs=100,
         learning_rate=1e-4,
-        sequence_length=48000,  # 3 seconds
+        sequence_length=48000,
         checkpoint_dir="checkpoints",
         log_dir="logs",
-        gpu_id=0  # Set to None for CPU
+        gpu_id=0
     )
