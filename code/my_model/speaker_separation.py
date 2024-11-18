@@ -117,7 +117,8 @@ class SpeakerSeparation(pl.LightningModule):
                 on_step=(step_type == 'train'),
                 on_epoch=True,
                 prog_bar=True,
-                sync_dist=True
+                sync_dist=True,
+                batch_size=len(batch['mixture'])  # Add this line
             )
 
         return metrics

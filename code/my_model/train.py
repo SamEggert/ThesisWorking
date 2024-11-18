@@ -133,7 +133,8 @@ def train_model(
         batch_size=train_batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=True  # Add this line
     )
 
     val_loader = DataLoader(
@@ -141,7 +142,8 @@ def train_model(
         batch_size=val_batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=True  # Add this line
     )
 
     # Initialize model
@@ -150,16 +152,16 @@ def train_model(
     # Set up checkpointing
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
-        filename='{epoch}-{val_loss:.3f}',
-        save_top_k=3,          # Save the 3 best models
-        monitor='val_loss',
+        filename='{epoch}-{val_epoch_l1_loss:.3f}',
+        save_top_k=3,
+        monitor='val_epoch_l1_loss',  # Change this to match the metric you're logging
         mode='min',
-        save_last=True         # Also save the last model
+        save_last=True
     )
 
     # Set up early stopping
     early_stop_callback = EarlyStopping(
-        monitor='val_loss',
+        monitor='val_epoch_l1_loss',  # Change this to match the metric you're logging
         min_delta=0.00,
         patience=10,
         verbose=False,
