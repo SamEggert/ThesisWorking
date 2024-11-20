@@ -4,3 +4,27 @@ checkpoints
 logs
 test_outputs
 dataset_cache
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Slurm output files
+slurm-*.out
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+
+# Generated files from testing
+*.wav
+*.png
+test_info.txt
