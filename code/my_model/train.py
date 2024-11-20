@@ -171,15 +171,15 @@ class CachedVCTKDataset(Dataset):
 
 def train_model(
     vctk_dir,
-    train_batch_size=4,          # Reduced for stability
-    val_batch_size=4,
+    train_batch_size=32,          # Reduced for stability
+    val_batch_size=32,
     num_epochs=200,
     num_workers=2,
     learning_rate=3e-4,
     sequence_length=32000,
     checkpoint_dir="checkpoints",
     log_dir="logs",
-    max_files_per_speaker=20,
+    max_files_per_speaker=50,
     max_speakers=10,
     resume_from_checkpoint=None
 ):
@@ -261,8 +261,9 @@ def train_model(
     # Initialize trainer
     trainer = pl.Trainer(
         max_epochs=num_epochs,
-        accelerator='cpu',        # Force CPU for now
+        accelerator='gpu',        # Force CPU for now
         devices=1,
+        strategy='auto',
         callbacks=[
             ModelCheckpoint(
                 dirpath=checkpoint_dir,
@@ -285,7 +286,8 @@ def train_model(
         log_every_n_steps=10,
         val_check_interval=1.0,
         gradient_clip_val=1.0,
-        accumulate_grad_batches=2,  # Reduced for stability
+        accumulate_grad_batches=1,
+        precision='16-mixed',
         enable_progress_bar=True,
         enable_model_summary=True,
         num_sanity_val_steps=1
@@ -300,20 +302,20 @@ def train_model(
     )
 
 if __name__ == "__main__":
-    vctk_dir = "/Users/samueleggert/GitHub/ThesisWorking/code/my_model/audio/VCTK-Corpus-0.92"
-    checkpoint_path = "checkpoints/epoch=39-val_epoch_l1_loss=0.063.ckpt"
+    vctk_dir = "/scratch/network/se2375/ThesisWorking/code/my_model/audio/VCTK-Corpus-0.92"
+    checkpoint_path = "None"
 
     train_model(
         vctk_dir=vctk_dir,
-        train_batch_size=8,        # Increased from 2 for stability
-        val_batch_size=8,          # Increased from 2
-        num_workers=2,
+        train_batch_size=32,
+        val_batch_size=32,
+        num_workers=8,
         num_epochs=200,
         learning_rate=3e-4,
-        sequence_length=32000,     # 2 seconds of audio
+        sequence_length=32000,
         checkpoint_dir="checkpoints",
         log_dir="logs",
-        max_files_per_speaker=20,  # Increased for more data
-        max_speakers=10,
+        max_files_per_speaker=50,
+        max_speakers=20,
         resume_from_checkpoint=checkpoint_path
     )
