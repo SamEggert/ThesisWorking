@@ -1,49 +1,149 @@
 import os
 import torch
+import torchaudio
 from torch.utils.data import Dataset, DataLoader
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from speaker_separation import SpeakerSeparation
-from resemblyzer.audio import preprocess_wav
+import numpy as np
 import random
 import glob
-import numpy as np
+from pathlib import Path
+import pickle
+from tqdm import tqdm
 
-class VoiceSeparationDataset(Dataset):
+class CachedVCTKDataset(Dataset):
     def __init__(
         self,
-        target_voices,    # List of paths to sam's voice files
-        noise_voices,     # List of paths to bea's voice files
-        sequence_length=48000,  # 3 seconds at 16kHz
-        min_snr=0,       # Minimum signal-to-noise ratio in dB
-        max_snr=5        # Maximum signal-to-noise ratio in dB
+        vctk_dir,
+        sequence_length=32000,  # Reduced from 48000
+        min_snr=0,
+        max_snr=5,
+        split='train',
+        train_ratio=0.8,
+        max_files_per_speaker=20,  # Reduced from 50
+        max_speakers=20,           # New parameter
+        cache_dir='dataset_cache'
     ):
-        self.target_voices = target_voices
-        self.noise_voices = noise_voices
         self.sequence_length = sequence_length
         self.min_snr = min_snr
         self.max_snr = max_snr
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+
+        cache_file = self.cache_dir / f'vctk_{split}_cache_{max_speakers}spk_{max_files_per_speaker}files.pkl'
+
+        if cache_file.exists():
+            print(f"Loading cached {split} dataset...")
+            with open(cache_file, 'rb') as f:
+                cache_data = pickle.load(f)
+                self.preprocessed_data = cache_data['preprocessed_data']
+                self.speakers = cache_data['speakers']
+                self.speaker_files = cache_data['speaker_files']
+        else:
+            print(f"Creating new {split} dataset cache...")
+            self._create_and_cache_dataset(
+                vctk_dir,
+                split,
+                train_ratio,
+                max_files_per_speaker,
+                max_speakers,
+                cache_file
+            )
+
+    def _create_and_cache_dataset(self, vctk_dir, split, train_ratio, max_files_per_speaker, max_speakers, cache_file):
+        # Find all speaker directories
+        wav_dir = os.path.join(vctk_dir, 'wav48_silence_trimmed')
+        speaker_dirs = [d for d in os.listdir(wav_dir)
+                       if os.path.isdir(os.path.join(wav_dir, d)) and d.startswith('p')]
+
+        # Limit number of speakers
+        random.seed(42)
+        random.shuffle(speaker_dirs)
+        speaker_dirs = speaker_dirs[:max_speakers]
+
+        # Create dictionary of speaker files
+        self.speaker_files = {}
+        for speaker in speaker_dirs:
+            speaker_path = os.path.join(wav_dir, speaker)
+            flac_files = glob.glob(os.path.join(speaker_path, '*.flac'))
+            if flac_files:
+                # Limit files per speaker
+                self.speaker_files[speaker] = flac_files[:max_files_per_speaker]
+
+        # Split speakers
+        random.seed(42)
+        speakers = list(self.speaker_files.keys())
+        random.shuffle(speakers)
+        split_idx = int(len(speakers) * train_ratio)
+
+        if split == 'train':
+            self.speakers = speakers[:split_idx]
+        else:
+            self.speakers = speakers[split_idx:]
+
+        # Preprocess and cache all files
+        self.preprocessed_data = []
+        print("Preprocessing audio files...")
+        for speaker in tqdm(self.speakers):
+            for file_path in self.speaker_files[speaker]:
+                try:
+                    processed = self._preprocess_file(file_path)
+                    if processed is not None:
+                        self.preprocessed_data.append({
+                            'audio': processed,
+                            'speaker': speaker,
+                            'path': file_path
+                        })
+                except Exception as e:
+                    print(f"Error processing {file_path}: {e}")
+
+        # Save cache
+        cache_data = {
+            'preprocessed_data': self.preprocessed_data,
+            'speakers': self.speakers,
+            'speaker_files': self.speaker_files
+        }
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache_data, f)
+
+    def _preprocess_file(self, file_path):
+        # Load and preprocess audio file
+        waveform, sample_rate = torchaudio.load(file_path)
+
+        # Convert to mono if stereo
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+        # Resample if necessary
+        if sample_rate != 16000:
+            resampler = torchaudio.transforms.Resample(sample_rate, 16000)
+            waveform = resampler(waveform)
+
+        return waveform.squeeze().numpy()
 
     def __len__(self):
-        return len(self.target_voices)
+        return len(self.preprocessed_data)
 
     def __getitem__(self, idx):
-        # Load target voice
-        target_path = self.target_voices[idx]
-        target_wav = preprocess_wav(target_path)
+        # Get target audio
+        target_data = self.preprocessed_data[idx]
+        target_wav = target_data['audio']
+        target_speaker = target_data['speaker']
 
-        # Load random noise voice
-        noise_path = random.choice(self.noise_voices)
-        noise_wav = preprocess_wav(noise_path)
+        # Get random different speaker
+        available_speakers = [s for s in self.speakers if s != target_speaker]
+        noise_speaker = random.choice(available_speakers)
+        noise_data = random.choice([d for d in self.preprocessed_data if d['speaker'] == noise_speaker])
+        noise_wav = noise_data['audio']
 
-        # Take random chunks if longer than sequence_length
+        # Handle sequence length
         if len(target_wav) > self.sequence_length:
             start = random.randint(0, len(target_wav) - self.sequence_length)
             target_wav = target_wav[start:start + self.sequence_length]
         else:
-            # Pad if too short
             target_wav = np.pad(target_wav, (0, self.sequence_length - len(target_wav)))
 
         if len(noise_wav) > self.sequence_length:
@@ -66,75 +166,53 @@ class VoiceSeparationDataset(Dataset):
         return {
             'mixture': torch.from_numpy(mixture).float(),
             'target': torch.from_numpy(target_wav).float(),
-            'speaker_wav': target_path  # Original path for speaker embedding
+            'speaker_wav': target_data['path']
         }
 
 def train_model(
-    train_batch_size=8,
-    val_batch_size=8,
-    num_epochs=100,
-    num_workers=4,
-    learning_rate=1e-4,
-    sequence_length=48000,  # 3 seconds at 16kHz
+    vctk_dir,
+    train_batch_size=4,          # Reduced for stability
+    val_batch_size=4,
+    num_epochs=200,
+    num_workers=2,
+    learning_rate=3e-4,
+    sequence_length=32000,
     checkpoint_dir="checkpoints",
     log_dir="logs",
-    gpu_id=0 if torch.cuda.is_available() else None
+    max_files_per_speaker=20,
+    max_speakers=10,
+    resume_from_checkpoint=None
 ):
     # Create directories
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
 
-    # Get file paths
-    sam_voices = glob.glob('audio/sam_Neutral/*.wav')
-    bea_voices = glob.glob('audio/bea_Neutral/*.wav')
-
-    # Split into train/val
-    random.seed(42)  # For reproducibility
-    random.shuffle(sam_voices)
-    random.shuffle(bea_voices)
-
-
-    # Calculate train_size based on the smaller dataset
-    train_size = int(0.8 * min(len(sam_voices), len(bea_voices)))
-
-    # Adjust the split for both datasets
-    train_target = sam_voices[:train_size]
-    val_target = sam_voices[train_size:train_size + int(0.2 * len(sam_voices))]
-    train_noise = bea_voices[:train_size]
-    val_noise = bea_voices[train_size:train_size + int(0.2 * len(bea_voices))]
-
-    print("\nDataset splits:")
-    print(f"Total sam voices: {len(sam_voices)}")
-    print(f"Total bea voices: {len(bea_voices)}")
-    print(f"Train size: {train_size}")
-    print(f"Train target: {len(train_target)}")
-    print(f"Val target: {len(val_target)}")
-    print(f"Train noise: {len(train_noise)}")
-    print(f"Val noise: {len(val_noise)}")
-
-    print(f"Training on {len(train_target)} samples")
-    print(f"Validating on {len(val_target)} samples")
-
-
-    # Create datasets and dataloaders
-    train_dataset = VoiceSeparationDataset(
-        train_target,
-        train_noise,
-        sequence_length=sequence_length
-    )
-    val_dataset = VoiceSeparationDataset(
-        val_target,
-        val_noise,
-        sequence_length=sequence_length
+    # Create datasets
+    train_dataset = CachedVCTKDataset(
+        vctk_dir=vctk_dir,
+        sequence_length=sequence_length,
+        split='train',
+        max_files_per_speaker=max_files_per_speaker,
+        max_speakers=max_speakers
     )
 
+    val_dataset = CachedVCTKDataset(
+        vctk_dir=vctk_dir,
+        sequence_length=sequence_length,
+        split='val',
+        max_files_per_speaker=max_files_per_speaker,
+        max_speakers=max_speakers
+    )
+
+    # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=train_batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True  # Add this line
+        pin_memory=False,
+        persistent_workers=True,
+        drop_last=True
     )
 
     val_loader = DataLoader(
@@ -142,73 +220,100 @@ def train_model(
         batch_size=val_batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True  # Add this line
+        pin_memory=False,
+        persistent_workers=True,
+        drop_last=True
     )
 
     # Initialize model
-    model = SpeakerSeparation(learning_rate=learning_rate)
+    if resume_from_checkpoint:
+        print(f"\nResuming from checkpoint: {resume_from_checkpoint}")
+        model = SpeakerSeparation.load_from_checkpoint(
+            resume_from_checkpoint,
+            learning_rate=learning_rate
+        )
+    else:
+        print("\nStarting new training...")
+        model = SpeakerSeparation(learning_rate=learning_rate)
 
-    # Set up checkpointing
+    # Set up callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
         filename='{epoch}-{val_epoch_l1_loss:.3f}',
-        save_top_k=2,          # Only keep 2 best models
+        save_top_k=2,
         monitor='val_epoch_l1_loss',
         mode='min',
-        save_last=True,        # Keep last checkpoint
-        every_n_epochs=1,      # Save every epoch
-        auto_insert_metric_name=True
+        save_last=True,
+        every_n_epochs=2,
     )
 
-    # Set up early stopping
     early_stop_callback = EarlyStopping(
-        monitor='val_epoch_l1_loss',  # Change this to match the metric you're logging
-        min_delta=0.00,
-        patience=10,
-        verbose=False,
+        monitor='val_epoch_l1_loss',
+        min_delta=0.001,
+        patience=20,
+        verbose=True,
         mode='min'
     )
 
-    # Set up logging
+    # Set up logger
     logger = TensorBoardLogger(log_dir, name="speaker_separation")
 
     # Initialize trainer
     trainer = pl.Trainer(
         max_epochs=num_epochs,
-        accelerator='gpu' if gpu_id is not None else 'cpu',
-        devices=[gpu_id] if gpu_id is not None else None,
-        callbacks=[checkpoint_callback, early_stop_callback],
+        accelerator='cpu',        # Force CPU for now
+        devices=1,
+        callbacks=[
+            ModelCheckpoint(
+                dirpath=checkpoint_dir,
+                filename='{epoch}-{val_epoch_l1_loss:.3f}',
+                save_top_k=2,
+                monitor='val_epoch_l1_loss',
+                mode='min',
+                save_last=True,
+                every_n_epochs=2,
+            ),
+            EarlyStopping(
+                monitor='val_epoch_l1_loss',
+                min_delta=0.001,
+                patience=20,
+                verbose=True,
+                mode='min'
+            )
+        ],
         logger=logger,
         log_every_n_steps=10,
-        val_check_interval=0.5,
-        precision=16,  # Use half precision
-        gradient_clip_val=1.0,  # Add gradient clipping
-        accumulate_grad_batches=2  # Accumulate gradients
+        val_check_interval=1.0,
+        gradient_clip_val=1.0,
+        accumulate_grad_batches=2,  # Reduced for stability
+        enable_progress_bar=True,
+        enable_model_summary=True,
+        num_sanity_val_steps=1
     )
-
-
-    print("trainer:", trainer)
-    print("train loader:", train_loader)
-    print("val loader:", val_loader)
-
 
     # Train model
     trainer.fit(
         model,
         train_dataloaders=train_loader,
-        val_dataloaders=val_loader
+        val_dataloaders=val_loader,
+        ckpt_path=resume_from_checkpoint
     )
 
 if __name__ == "__main__":
+    vctk_dir = "/Users/samueleggert/GitHub/ThesisWorking/code/my_model/audio/VCTK-Corpus-0.92"
+    checkpoint_path = "checkpoints/epoch=39-val_epoch_l1_loss=0.063.ckpt"
+
     train_model(
-        train_batch_size=4,  # Reduce from 8
-        val_batch_size=4,    # Reduce from 8
-        num_workers=2,       # Reduce from 4
-        num_epochs=100,
-        learning_rate=1e-4,
-        sequence_length=48000,
+        vctk_dir=vctk_dir,
+        train_batch_size=8,        # Increased from 2 for stability
+        val_batch_size=8,          # Increased from 2
+        num_workers=2,
+        num_epochs=200,
+        learning_rate=3e-4,
+        sequence_length=32000,     # 2 seconds of audio
         checkpoint_dir="checkpoints",
         log_dir="logs",
-        gpu_id=0
+        max_files_per_speaker=20,  # Increased for more data
+        max_speakers=10,
+        resume_from_checkpoint=checkpoint_path
     )

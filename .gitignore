@@ -3,3 +3,4 @@ audio
 checkpoints
 logs
 test_outputs
+dataset_cache

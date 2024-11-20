@@ -9,7 +9,6 @@ import os
 import matplotlib.pyplot as plt
 
 def plot_waveforms(mixture, separated, target, output_dir):
-    """Plot waveforms for visual comparison"""
     plt.figure(figsize=(15, 10))
 
     plt.subplot(3, 1, 1)
@@ -32,24 +31,19 @@ def plot_waveforms(mixture, separated, target, output_dir):
     plt.close()
 
 def calculate_metrics(separated, target, mixture):
-    """Calculate separation metrics"""
-    # Convert to tensor
     separated = torch.from_numpy(separated)
     target = torch.from_numpy(target)
     mixture = torch.from_numpy(mixture)
 
-    # SNR
     noise = separated - target
     signal_power = torch.mean(target ** 2)
     noise_power = torch.mean(noise ** 2)
     snr = 10 * torch.log10(signal_power / (noise_power + 1e-10))
 
-    # Original mixture SNR
     orig_noise = mixture - target
     orig_noise_power = torch.mean(orig_noise ** 2)
     orig_snr = 10 * torch.log10(signal_power / (orig_noise_power + 1e-10))
 
-    # SI-SNR
     separated_norm = separated - torch.mean(separated)
     target_norm = target - torch.mean(target)
 
@@ -68,59 +62,51 @@ def calculate_metrics(separated, target, mixture):
         'difference': torch.mean(torch.abs(separated - mixture)).item()
     }
 
-def separate_voice(model, mixture, speaker_wav, device='cpu'):
-    """Separate voice using the trained model"""
-    # Convert mixture to tensor and reshape
-    mixture_tensor = torch.from_numpy(mixture).float().to(device)
-    mixture_tensor = mixture_tensor.view(1, 1, -1)  # [1, 1, samples]
+def load_and_preprocess_wav(file_path):
+    waveform, sample_rate = torchaudio.load(file_path)
 
-    # Get speaker embedding
-    wav = preprocess_wav(speaker_wav)
+    if waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+    if sample_rate != 16000:
+        resampler = torchaudio.transforms.Resample(sample_rate, 16000)
+        waveform = resampler(waveform)
+
+    waveform = waveform.squeeze().numpy()
+    waveform = preprocess_wav(waveform, source_sr=16000)
+
+    return waveform
+
+def separate_voice(model, mixture, speaker_wav, device='cpu'):
+    mixture_tensor = torch.from_numpy(mixture).float().to(device)
+    mixture_tensor = mixture_tensor.view(1, 1, -1)
+
+    wav = load_and_preprocess_wav(speaker_wav)
     encoder = VoiceEncoder()
     embedding = encoder.embed_utterance(wav)
     speaker_embedding = torch.from_numpy(embedding).float().to(device)
 
-    # Create input dict
     input_dict = {
         'mixture': mixture_tensor,
         'condition': speaker_embedding.unsqueeze(0)
     }
 
-    # Print shapes for debugging
-    print(f"\nInput shapes:")
-    print(f"Mixture tensor shape: {mixture_tensor.shape}")
-    print(f"Speaker embedding shape: {speaker_embedding.shape}")
-
-    # Run inference
     with torch.no_grad():
         output_dict = model(input_dict)
         separated = output_dict['waveform'].squeeze().cpu().numpy()
 
-    print(f"Output shape: {separated.shape}")
-
     return separated
 
 def create_mixed_signal(target_wav, noise_wav):
-    """Create a mixture signal, handling different lengths"""
-    # Print original lengths
-    print(f"Original lengths - Target: {len(target_wav)}, Noise: {len(noise_wav)}")
-
-    # Use shorter length
     min_length = min(len(target_wav), len(noise_wav))
-
-    # Truncate both to minimum length
     target_wav = target_wav[:min_length]
     noise_wav = noise_wav[:min_length]
 
-    print(f"After truncation - Target: {len(target_wav)}, Noise: {len(noise_wav)}")
-
-    # Mix with 0dB SNR
     target_rms = np.sqrt(np.mean(target_wav**2))
     noise_rms = np.sqrt(np.mean(noise_wav**2))
     noise_gain = target_rms / noise_rms
     mixture = target_wav + noise_gain * noise_wav
 
-    # Normalize
     mixture = mixture / np.max(np.abs(mixture))
     target_wav = target_wav / np.max(np.abs(target_wav))
 
@@ -128,59 +114,48 @@ def create_mixed_signal(target_wav, noise_wav):
 
 def main():
     # Define paths
-    BASE_DIR = "/Users/samueleggert/GitHub/ThesisWorking/code/my_model"
-    CHECKPOINT_PATH = os.path.join(BASE_DIR, "checkpoints/last-v2.ckpt") # checkpoints are variable to change
-    SAM_WAV = os.path.join(BASE_DIR, "audio/sam_Neutral/neutral_1-28_0001.wav")
-    BEA_WAV = os.path.join(BASE_DIR, "audio/bea_Neutral/Neutral_1-28_0001.wav")
-    OUTPUT_DIR = os.path.join(BASE_DIR, "test_outputs")
+    BASE_DIR = "/Users/samueleggert/GitHub/ThesisWorking"
+    TARGET_PATH = os.path.join(BASE_DIR, "audio/bea_Neutral/Neutral_1-28_0001.wav")
+    NOISE_PATH = os.path.join(BASE_DIR, "audio/sam_Neutral/neutral_1-28_0001.wav")
+    CHECKPOINT_PATH = os.path.join(BASE_DIR, "code/my_model/checkpoints/epoch=42-val_epoch_l1_loss=0.032.ckpt")
+    OUTPUT_DIR = os.path.join(BASE_DIR, "code/my_model/test_outputs")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    device = 'cpu'
 
-    # Set device
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
-
-    # Load and preprocess the wav files
     print("Loading audio files...")
-    target_wav = preprocess_wav(SAM_WAV)
-    noise_wav = preprocess_wav(BEA_WAV)
+    target_wav = load_and_preprocess_wav(TARGET_PATH)
+    noise_wav = load_and_preprocess_wav(NOISE_PATH)
 
-    # Create mixture
     print("Creating mixed signal...")
     mixture, target_wav = create_mixed_signal(target_wav, noise_wav)
 
-    # Load model
     print("Loading model...")
     model = SpeakerSeparation.load_from_checkpoint(CHECKPOINT_PATH)
     model = model.to(device)
     model.eval()
 
-    # Separate
     print("Performing separation...")
-    separated_wav = separate_voice(model, mixture, SAM_WAV, device)
+    separated_wav = separate_voice(model, mixture, TARGET_PATH, device)
 
-    # Calculate metrics
     metrics = calculate_metrics(separated_wav, target_wav, mixture)
     print("\nSeparation Metrics:")
-    print(f"SNR: {metrics['snr']:.2f} dB")
-    print(f"Original Mixture SNR: {metrics['original_snr']:.2f} dB")
-    print(f"SI-SNR: {metrics['si_snr']:.2f} dB")
-    print(f"Mean absolute difference from mixture: {metrics['difference']:.4f}")
+    for key, value in metrics.items():
+        print(f"{key}: {value:.2f}")
 
-    # Plot waveforms
     plot_waveforms(mixture, separated_wav, target_wav, OUTPUT_DIR)
 
-    # Save audio files
-    print("\nSaving results...")
+    print("\nSaving audio files...")
     wavfile.write(os.path.join(OUTPUT_DIR, "mixture.wav"), 16000, mixture.astype(np.float32))
     wavfile.write(os.path.join(OUTPUT_DIR, "separated.wav"), 16000, separated_wav.astype(np.float32))
     wavfile.write(os.path.join(OUTPUT_DIR, "original.wav"), 16000, target_wav.astype(np.float32))
 
-    print(f"\nDone! Check the output files in {OUTPUT_DIR}")
-    print("- mixture.wav: The mixed signal (Sam + Bea)")
-    print("- separated.wav: The separated voice (should be Sam)")
-    print("- original.wav: The original clean voice (Sam)")
-    print("- waveform_comparison.png: Visual comparison of the waveforms")
+    with open(os.path.join(OUTPUT_DIR, "test_info.txt"), "w") as f:
+        f.write(f"Target Speaker File: {TARGET_PATH}\n")
+        f.write(f"Noise Speaker File: {NOISE_PATH}\n")
+        f.write("\nMetrics:\n")
+        for key, value in metrics.items():
+            f.write(f"{key}: {value:.2f}\n")
 
 if __name__ == "__main__":
     main()

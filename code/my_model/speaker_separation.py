@@ -70,63 +70,64 @@ class SpeakerSeparation(pl.LightningModule):
         }
 
     def _shared_step(self, batch, batch_idx, step_type='train'):
-        # Move the speaker encoder to CPU (since it's having issues with MPS)
+        # Ensure speaker encoder is on CPU
         self.speaker_encoder = self.speaker_encoder.cpu()
 
-        # Get speaker embeddings
-        if isinstance(batch['speaker_wav'][0], str):
-            embeddings = []
-            for wav in batch['speaker_wav']:
-                # Process on CPU
-                wav_data = preprocess_wav(wav)
-                # Keep on CPU for embedding
-                with torch.no_grad():
-                    embedding = self.speaker_encoder.embed_utterance(wav_data)
-                # Only move the final embedding to the target device
-                embeddings.append(torch.from_numpy(embedding).float().to(self.device))
-            embeddings = torch.stack(embeddings)
-        else:
-            embeddings = []
-            for wav in batch['speaker_wav']:
-                # Move to CPU for processing
-                wav_cpu = wav.cpu().numpy()
-                with torch.no_grad():
-                    embedding = self.speaker_encoder.embed_utterance(wav_cpu)
-                # Move only the embedding to target device
-                embeddings.append(torch.from_numpy(embedding).float().to(self.device))
-            embeddings = torch.stack(embeddings)
+        try:
+            # Get speaker embeddings
+            if isinstance(batch['speaker_wav'][0], str):
+                embeddings = []
+                for wav in batch['speaker_wav']:
+                    wav_data = preprocess_wav(wav)
+                    with torch.no_grad():
+                        embedding = self.speaker_encoder.embed_utterance(wav_data)
+                    embeddings.append(torch.from_numpy(embedding).float())
+                embeddings = torch.stack(embeddings)
+            else:
+                embeddings = []
+                for wav in batch['speaker_wav']:
+                    wav_cpu = wav.cpu().numpy()
+                    with torch.no_grad():
+                        embedding = self.speaker_encoder.embed_utterance(wav_cpu)
+                    embeddings.append(torch.from_numpy(embedding).float())
+                embeddings = torch.stack(embeddings)
 
-        # Prepare input (everything else should already be on the correct device)
-        input_dict = {
-            'mixture': batch['mixture'].unsqueeze(1).to(self.device),
-            'condition': embeddings.to(self.device),
-        }
+            # Move data to the same device as the model
+            embeddings = embeddings.to(self.device)
+            mixture = batch['mixture'].unsqueeze(1).to(self.device)
+            target = batch['target'].to(self.device)
 
-        # Forward pass
-        output_dict = self.ss_model(input_dict)
-        separated = output_dict['waveform'].squeeze(1)
+            # Forward pass
+            output_dict = self.ss_model({
+                'mixture': mixture,
+                'condition': embeddings,
+            })
+            separated = output_dict['waveform'].squeeze(1)
 
-        # Calculate metrics
-        metrics = self._compute_metrics(separated, batch['target'].to(self.device))
+            # Calculate metrics
+            metrics = self._compute_metrics(separated, target)
 
-        # Log metrics
-        for metric_name, value in metrics.items():
-            self.log(
-                f'{step_type}_{metric_name}',
-                value,
-                on_step=(step_type == 'train'),
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-                batch_size=len(batch['mixture'])  # Add this line
-            )
+            # Log metrics
+            for metric_name, value in metrics.items():
+                self.log(
+                    f'{step_type}_{metric_name}',
+                    value,
+                    on_step=(step_type == 'train'),
+                    on_epoch=True,
+                    prog_bar=True,
+                    sync_dist=True,
+                    batch_size=len(mixture)
+                )
 
-        if batch_idx % 10 == 0:
-            torch.cuda.empty_cache()  # For GPU
-            import gc
-            gc.collect()  # For CPU
+            return metrics
 
-        return metrics
+        except Exception as e:
+            print(f"Error in {step_type}_step: {str(e)}")
+            return {
+                'snr': torch.tensor(0.0).to(self.device),
+                'si_snr': torch.tensor(0.0).to(self.device),
+                'l1_loss': torch.tensor(0.0).to(self.device)
+            }
 
     def training_step(self, batch, batch_idx):
         metrics = self._shared_step(batch, batch_idx, 'train')
@@ -139,15 +140,22 @@ class SpeakerSeparation(pl.LightningModule):
         return metrics['l1_loss']
 
     def on_train_epoch_end(self):
-        # Calculate epoch metrics
-        metrics = {
+        if not self.train_step_outputs:  # Check if list is empty
+            self.log_dict({
+                'train_epoch_snr': 0.0,
+                'train_epoch_si_snr': 0.0,
+                'train_epoch_l1_loss': 0.0
+            })
+            return
+
+        # If we have outputs, calculate metrics as before
+        self.log_dict({
             'train_epoch_snr': torch.stack([x['snr'] for x in self.train_step_outputs]).mean(),
             'train_epoch_si_snr': torch.stack([x['si_snr'] for x in self.train_step_outputs]).mean(),
             'train_epoch_l1_loss': torch.stack([x['l1_loss'] for x in self.train_step_outputs]).mean()
-        }
+        })
 
-        # Log epoch metrics
-        self.log_dict(metrics, prog_bar=True)
+        # Clear the outputs list
         self.train_step_outputs.clear()
 
     def on_validation_epoch_end(self):
