@@ -1,10 +1,15 @@
 #!/bin/bash
 
+# Load required modules
+module purge
+module load anaconda3/2023.3
+
 # Create and activate virtual environment
 python -m venv venv
 source venv/bin/activate
 
 # Install required packages
+pip install --upgrade pip
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install lightning
 pip install torchaudio
@@ -34,7 +39,7 @@ module purge
 module load anaconda3/2023.3
 
 # Activate virtual environment
-source /home/$USER/venv/bin/activate
+source /home/$USER/my_model/venv/bin/activate
 
 # Run the training script
 python train.py
