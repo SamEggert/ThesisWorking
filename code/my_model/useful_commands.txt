@@ -1,0 +1,9 @@
+# prompt with whole repository
+code2prompt . --exclude-folders "audio, checkpoints, dataset_cache, logs, test_outputs, __pycache__"
+
+# run tensorboard from ssh
+tensorboard --logdir=logs --port=6006
+
+# move into the most relevant directory
+cd /scratch/network/se2375/ThesisWorking/code/my_model/
+

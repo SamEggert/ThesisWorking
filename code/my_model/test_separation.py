@@ -7,25 +7,24 @@ from resemblyzer.audio import preprocess_wav
 from scipy.io import wavfile
 import os
 import matplotlib.pyplot as plt
+import random
+import glob
+import lightning.pytorch as pl
 
 def plot_waveforms(mixture, separated, target, output_dir):
     plt.figure(figsize=(15, 10))
-
     plt.subplot(3, 1, 1)
     plt.plot(mixture)
     plt.title('Mixture')
     plt.ylabel('Amplitude')
-
     plt.subplot(3, 1, 2)
     plt.plot(separated)
     plt.title('Separated')
     plt.ylabel('Amplitude')
-
     plt.subplot(3, 1, 3)
     plt.plot(target)
     plt.title('Target')
     plt.ylabel('Amplitude')
-
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'waveform_comparison.png'))
     plt.close()
@@ -64,38 +63,24 @@ def calculate_metrics(separated, target, mixture):
 
 def load_and_preprocess_wav(file_path):
     waveform, sample_rate = torchaudio.load(file_path)
-
     if waveform.shape[0] > 1:
         waveform = torch.mean(waveform, dim=0, keepdim=True)
-
-    if sample_rate != 16000:
-        resampler = torchaudio.transforms.Resample(sample_rate, 16000)
-        waveform = resampler(waveform)
-
     waveform = waveform.squeeze().numpy()
-    waveform = preprocess_wav(waveform, source_sr=16000)
-
+    waveform = preprocess_wav(waveform, source_sr=48000)
     return waveform
 
-def separate_voice(model, mixture, speaker_wav, device='cpu'):
-    mixture_tensor = torch.from_numpy(mixture).float().to(device)
-    mixture_tensor = mixture_tensor.view(1, 1, -1)
+def get_random_speaker_file(vctk_dir, exclude_speaker=None):
+    wav_dir = os.path.join(vctk_dir, 'wav48_silence_trimmed')
+    speaker_dirs = [d for d in os.listdir(wav_dir)
+                   if os.path.isdir(os.path.join(wav_dir, d)) and d.startswith('p')]
 
-    wav = load_and_preprocess_wav(speaker_wav)
-    encoder = VoiceEncoder()
-    embedding = encoder.embed_utterance(wav)
-    speaker_embedding = torch.from_numpy(embedding).float().to(device)
+    if exclude_speaker:
+        speaker_dirs.remove(exclude_speaker)
 
-    input_dict = {
-        'mixture': mixture_tensor,
-        'condition': speaker_embedding.unsqueeze(0)
-    }
-
-    with torch.no_grad():
-        output_dict = model(input_dict)
-        separated = output_dict['waveform'].squeeze().cpu().numpy()
-
-    return separated
+    speaker = random.choice(speaker_dirs)
+    speaker_path = os.path.join(wav_dir, speaker)
+    flac_files = glob.glob(os.path.join(speaker_path, '*.flac'))
+    return random.choice(flac_files), speaker
 
 def create_mixed_signal(target_wav, noise_wav):
     min_length = min(len(target_wav), len(noise_wav))
@@ -114,29 +99,55 @@ def create_mixed_signal(target_wav, noise_wav):
 
 def main():
     # Define paths
-    BASE_DIR = "/Users/samueleggert/GitHub/ThesisWorking"
-    TARGET_PATH = os.path.join(BASE_DIR, "audio/bea_Neutral/Neutral_1-28_0001.wav")
-    NOISE_PATH = os.path.join(BASE_DIR, "audio/sam_Neutral/neutral_1-28_0001.wav")
-    CHECKPOINT_PATH = os.path.join(BASE_DIR, "code/my_model/checkpoints/epoch=42-val_epoch_l1_loss=0.032.ckpt")
-    OUTPUT_DIR = os.path.join(BASE_DIR, "code/my_model/test_outputs")
-
+    VCTK_DIR = "/scratch/network/se2375/ThesisWorking/code/my_model/audio/VCTK-Corpus-0.92"
+    CHECKPOINT_PATH = "checkpoints/epoch=42-val_epoch_l1_loss=0.032.ckpt"
+    OUTPUT_DIR = "test_outputs"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    device = 'cpu'
+
+    # Initialize PyTorch Lightning trainer with GPU
+    trainer = pl.Trainer(
+        accelerator='gpu',
+        devices=1,
+        precision='16-mixed'
+    )
+
+    print("Selecting random speakers...")
+    target_path, target_speaker = get_random_speaker_file(VCTK_DIR)
+    noise_path, noise_speaker = get_random_speaker_file(VCTK_DIR, exclude_speaker=target_speaker)
+
+    print(f"Target speaker: {target_speaker}")
+    print(f"Noise speaker: {noise_speaker}")
 
     print("Loading audio files...")
-    target_wav = load_and_preprocess_wav(TARGET_PATH)
-    noise_wav = load_and_preprocess_wav(NOISE_PATH)
+    target_wav = load_and_preprocess_wav(target_path)
+    noise_wav = load_and_preprocess_wav(noise_path)
 
     print("Creating mixed signal...")
     mixture, target_wav = create_mixed_signal(target_wav, noise_wav)
 
     print("Loading model...")
     model = SpeakerSeparation.load_from_checkpoint(CHECKPOINT_PATH)
-    model = model.to(device)
     model.eval()
 
-    print("Performing separation...")
-    separated_wav = separate_voice(model, mixture, TARGET_PATH, device)
+    # Move to GPU and process
+    mixture_tensor = torch.from_numpy(mixture).float()
+    mixture_tensor = mixture_tensor.view(1, 1, -1)
+
+    wav = load_and_preprocess_wav(target_path)
+    encoder = VoiceEncoder().cuda()  # Move encoder to GPU
+    with torch.no_grad():
+        embedding = encoder.embed_utterance(wav)
+    speaker_embedding = torch.from_numpy(embedding).float()
+
+    input_dict = {
+        'mixture': mixture_tensor,
+        'condition': speaker_embedding.unsqueeze(0)
+    }
+
+    # Use trainer.predict instead of manual inference
+    with torch.no_grad():
+        predictions = trainer.predict(model, [input_dict])
+        separated_wav = predictions[0]['waveform'].squeeze().cpu().numpy()
 
     metrics = calculate_metrics(separated_wav, target_wav, mixture)
     print("\nSeparation Metrics:")
@@ -146,13 +157,15 @@ def main():
     plot_waveforms(mixture, separated_wav, target_wav, OUTPUT_DIR)
 
     print("\nSaving audio files...")
-    wavfile.write(os.path.join(OUTPUT_DIR, "mixture.wav"), 16000, mixture.astype(np.float32))
-    wavfile.write(os.path.join(OUTPUT_DIR, "separated.wav"), 16000, separated_wav.astype(np.float32))
-    wavfile.write(os.path.join(OUTPUT_DIR, "original.wav"), 16000, target_wav.astype(np.float32))
+    wavfile.write(os.path.join(OUTPUT_DIR, "mixture.wav"), 48000, mixture.astype(np.float32))
+    wavfile.write(os.path.join(OUTPUT_DIR, "separated.wav"), 48000, separated_wav.astype(np.float32))
+    wavfile.write(os.path.join(OUTPUT_DIR, "original.wav"), 48000, target_wav.astype(np.float32))
 
     with open(os.path.join(OUTPUT_DIR, "test_info.txt"), "w") as f:
-        f.write(f"Target Speaker File: {TARGET_PATH}\n")
-        f.write(f"Noise Speaker File: {NOISE_PATH}\n")
+        f.write(f"Target Speaker: {target_speaker}\n")
+        f.write(f"Target File: {target_path}\n")
+        f.write(f"Noise Speaker: {noise_speaker}\n")
+        f.write(f"Noise File: {noise_path}\n")
         f.write("\nMetrics:\n")
         for key, value in metrics.items():
             f.write(f"{key}: {value:.2f}\n")
