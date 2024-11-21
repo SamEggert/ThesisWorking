@@ -280,7 +280,7 @@ def train_model(
         log_every_n_steps=10,
         val_check_interval=1.0,
         gradient_clip_val=1.0,
-        accumulate_grad_batches=1,
+        accumulate_grad_batches=4,
         enable_progress_bar=True,
         enable_model_summary=True,
         deterministic=True
@@ -300,8 +300,8 @@ if __name__ == "__main__":
 
     train_model(
         vctk_dir=vctk_dir,
-        train_batch_size=16,
-        val_batch_size=16,
+        train_batch_size=8,
+        val_batch_size=8,
         num_workers=8,
         num_epochs=200,
         learning_rate=3e-4,
