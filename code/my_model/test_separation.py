@@ -100,7 +100,7 @@ def create_mixed_signal(target_wav, noise_wav):
 def main():
     # Define paths
     VCTK_DIR = "/scratch/network/se2375/ThesisWorking/code/my_model/audio/VCTK-Corpus-0.92"
-    CHECKPOINT_PATH = "checkpoints/epoch=42-val_epoch_l1_loss=0.032.ckpt"
+    CHECKPOINT_PATH = "checkpoints/epoch=9-val_epoch_l1_loss=0.020.ckpt"
     OUTPUT_DIR = "test_outputs"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
