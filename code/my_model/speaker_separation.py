@@ -12,19 +12,19 @@ import torch.nn.functional as F
 class SpeakerSeparation(pl.LightningModule):
     def __init__(self, learning_rate: float = 1e-3):
         super().__init__()
+        self.save_hyperparameters()
 
-        self.speaker_encoder = VoiceEncoder()
-        self.speaker_encoder = self.speaker_encoder.cuda()
-
+        # Initialize models
         self.ss_model = ResUNet30(
             input_channels=1,
             output_channels=1,
             condition_size=256
         )
 
-        self.learning_rate = learning_rate
+        # Initialize speaker encoder
+        self.speaker_encoder = None  # Will initialize in setup()
 
-        # Add metrics
+        self.learning_rate = learning_rate
         self.train_step_outputs = []
         self.validation_step_outputs = []
 
@@ -36,71 +36,38 @@ class SpeakerSeparation(pl.LightningModule):
             power=2
         )
 
+    def setup(self, stage=None):
+        """Initialize speaker encoder during setup phase"""
+        if self.speaker_encoder is None:
+            self.speaker_encoder = VoiceEncoder().to(self.device)
+            self.speaker_encoder.eval()  # Always in eval mode
+
     def forward(self, x):
         return self.ss_model(x)
 
-    def _compute_metrics(self, separated, target):
-        # Calculate SNR
-        noise = separated - target
-        signal_power = torch.mean(target ** 2)
-        noise_power = torch.mean(noise ** 2)
-        snr = 10 * torch.log10(signal_power / (noise_power + 1e-10))
+    def _get_speaker_embedding(self, wav_input):
+        """Helper function to get speaker embeddings"""
+        if isinstance(wav_input, str):
+            wav_data = preprocess_wav(wav_input)
+        else:
+            wav_data = wav_input.cpu().numpy()
 
-        # Calculate SI-SNR (Scale-Invariant Signal-to-Noise Ratio)
-        separated_norm = separated - torch.mean(separated, dim=-1, keepdim=True)
-        target_norm = target - torch.mean(target, dim=-1, keepdim=True)
-
-        # Normalize to zero mean and unit variance
-        separated_norm = separated_norm / (torch.norm(separated_norm, dim=-1, keepdim=True) + 1e-8)
-        target_norm = target_norm / (torch.norm(target_norm, dim=-1, keepdim=True) + 1e-8)
-
-        # SI-SNR calculation
-        s_target = torch.sum(separated_norm * target_norm, dim=-1, keepdim=True) * target_norm
-        e_noise = separated_norm - s_target
-
-        si_snr = 20 * torch.log10(torch.norm(s_target, dim=-1) / (torch.norm(e_noise, dim=-1) + 1e-8))
-
-        # L1 Loss
-        l1_loss = F.l1_loss(separated, target)
-
-        return {
-            'snr': snr.mean(),
-            'si_snr': si_snr.mean(),
-            'l1_loss': l1_loss
-        }
+        with torch.no_grad():
+            embedding = self.speaker_encoder.embed_utterance(wav_data)
+        return torch.from_numpy(embedding).float()
 
     def _shared_step(self, batch, batch_idx, step_type='train'):
-        # Ensure speaker encoder is on CPU
-        self.speaker_encoder = self.speaker_encoder.cpu()
-
         try:
-            # Get speaker embeddings
-            if isinstance(batch['speaker_wav'][0], str):
-                embeddings = []
-                for wav in batch['speaker_wav']:
-                    wav_data = preprocess_wav(wav)
-                    with torch.no_grad():
-                        embedding = self.speaker_encoder.embed_utterance(wav_data)
-                    embeddings.append(torch.from_numpy(embedding).float())
-                embeddings = torch.stack(embeddings)
-            else:
-                embeddings = []
-                for wav in batch['speaker_wav']:
-                    wav_cpu = wav.cpu().numpy()
-                    with torch.no_grad():
-                        embedding = self.speaker_encoder.embed_utterance(wav_cpu)
-                    embeddings.append(torch.from_numpy(embedding).float())
-                embeddings = torch.stack(embeddings)
+            # Process embeddings
+            embeddings = []
+            for wav in batch['speaker_wav']:
+                embedding = self._get_speaker_embedding(wav)
+                embeddings.append(embedding)
+            embeddings = torch.stack(embeddings).to(self.device)
 
-            # Move data to the same device as the model
-            embeddings = embeddings.to(self.device)
+            # Move input data to device
             mixture = batch['mixture'].unsqueeze(1).to(self.device)
             target = batch['target'].to(self.device)
-
-            mixture.requires_grad_(True)
-            embeddings.requires_grad_(True)
-            target.requires_grad_(True)
-
 
             # Forward pass
             output_dict = self.ss_model({
@@ -109,89 +76,91 @@ class SpeakerSeparation(pl.LightningModule):
             })
             separated = output_dict['waveform'].squeeze(1)
 
-            # Calculate metrics
-            metrics = self._compute_metrics(separated, target)
+            # Calculate L1 loss (primary training objective)
+            loss = F.l1_loss(separated, target)
+
+            # Calculate additional metrics
+            with torch.no_grad():
+                metrics = {
+                    'l1_loss': loss.item(),
+                    'snr': self._compute_snr(separated, target).item(),
+                    'si_snr': self._compute_si_snr(separated, target).item()
+                }
 
             # Log metrics
+            self.log(f'{step_type}_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
             for metric_name, value in metrics.items():
-                self.log(
-                    f'{step_type}_{metric_name}',
-                    value,
-                    on_step=(step_type == 'train'),
-                    on_epoch=True,
-                    prog_bar=True,
-                    sync_dist=True,
-                    batch_size=len(mixture)
-                )
+                if metric_name != 'l1_loss':  # Already logged the loss
+                    self.log(
+                        f'{step_type}_{metric_name}',
+                        value,
+                        on_step=(step_type == 'train'),
+                        on_epoch=True,
+                        prog_bar=True
+                    )
 
-            return metrics
+            return loss, metrics
 
         except Exception as e:
             print(f"Error in {step_type}_step: {str(e)}")
-            return {
-                'snr': torch.tensor(0.0).to(self.device),
-                'si_snr': torch.tensor(0.0).to(self.device),
-                'l1_loss': torch.tensor(0.0).to(self.device)
-            }
+            raise e
+
+    def _compute_snr(self, separated, target):
+        noise = separated - target
+        return 10 * torch.log10(
+            torch.mean(target ** 2) / (torch.mean(noise ** 2) + 1e-8)
+        )
+
+    def _compute_si_snr(self, separated, target):
+        separated_norm = separated - torch.mean(separated, dim=-1, keepdim=True)
+        target_norm = target - torch.mean(target, dim=-1, keepdim=True)
+
+        separated_norm = separated_norm / (torch.norm(separated_norm, dim=-1, keepdim=True) + 1e-8)
+        target_norm = target_norm / (torch.norm(target_norm, dim=-1, keepdim=True) + 1e-8)
+
+        s_target = torch.sum(separated_norm * target_norm, dim=-1, keepdim=True) * target_norm
+        e_noise = separated_norm - s_target
+
+        return 20 * torch.log10(
+            torch.norm(s_target, dim=-1) / (torch.norm(e_noise, dim=-1) + 1e-8)
+        )
 
     def training_step(self, batch, batch_idx):
-        metrics = self._shared_step(batch, batch_idx, 'train')
-        loss = metrics['l1_loss']
-
-        if not loss.requires_grad:
-            loss = loss.requires_grad_(True)
-
+        loss, metrics = self._shared_step(batch, batch_idx, 'train')
         self.train_step_outputs.append(metrics)
-        return metrics['l1_loss']
+        return loss
 
     def validation_step(self, batch, batch_idx):
-        metrics = self._shared_step(batch, batch_idx, 'val')
+        loss, metrics = self._shared_step(batch, batch_idx, 'val')
         self.validation_step_outputs.append(metrics)
-        return metrics['l1_loss']
+        return loss
 
     def on_train_epoch_end(self):
-        if not self.train_step_outputs:  # Check if list is empty
-            self.log_dict({
-                'train_epoch_snr': 0.0,
-                'train_epoch_si_snr': 0.0,
-                'train_epoch_l1_loss': 0.0
-            })
-            return
-
-        # If we have outputs, calculate metrics as before
-        self.log_dict({
-            'train_epoch_snr': torch.stack([x['snr'] for x in self.train_step_outputs]).mean(),
-            'train_epoch_si_snr': torch.stack([x['si_snr'] for x in self.train_step_outputs]).mean(),
-            'train_epoch_l1_loss': torch.stack([x['l1_loss'] for x in self.train_step_outputs]).mean()
-        })
-
-        # Clear the outputs list
+        if self.train_step_outputs:
+            avg_metrics = {
+                key: np.mean([x[key] for x in self.train_step_outputs])
+                for key in self.train_step_outputs[0].keys()
+            }
+            self.log_dict({f"train_epoch_{k}": v for k, v in avg_metrics.items()})
         self.train_step_outputs.clear()
 
     def on_validation_epoch_end(self):
-        # Calculate epoch metrics
-        metrics = {
-            'val_epoch_snr': torch.stack([x['snr'] for x in self.validation_step_outputs]).mean(),
-            'val_epoch_si_snr': torch.stack([x['si_snr'] for x in self.validation_step_outputs]).mean(),
-            'val_epoch_l1_loss': torch.stack([x['l1_loss'] for x in self.validation_step_outputs]).mean()
-        }
-
-        # Log epoch metrics
-        self.log_dict(metrics, prog_bar=True)
+        if self.validation_step_outputs:
+            avg_metrics = {
+                key: np.mean([x[key] for x in self.validation_step_outputs])
+                for key in self.validation_step_outputs[0].keys()
+            }
+            self.log_dict({f"val_epoch_{k}": v for k, v in avg_metrics.items()})
         self.validation_step_outputs.clear()
 
     def configure_optimizers(self):
-        for param in self.ss_model.parameters():
-            param.requires_grad = True
-
-
         optimizer = optim.AdamW(
             self.ss_model.parameters(),
             lr=self.learning_rate,
             betas=(0.9, 0.999),
-            eps=1e-08,
+            eps=1e-8,
             weight_decay=0.0,
-            amsgrad=True,
+            amsgrad=True
         )
 
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -208,5 +177,5 @@ class SpeakerSeparation(pl.LightningModule):
                 "scheduler": scheduler,
                 "monitor": "val_epoch_l1_loss",
                 "frequency": 1
-            },
+            }
         }

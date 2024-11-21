@@ -171,7 +171,7 @@ class CachedVCTKDataset(Dataset):
 
 def train_model(
     vctk_dir,
-    train_batch_size=32,          # Reduced for stability
+    train_batch_size=32,
     val_batch_size=32,
     num_epochs=200,
     num_workers=2,
@@ -255,15 +255,13 @@ def train_model(
         mode='min'
     )
 
-    # Set up logger
-    logger = TensorBoardLogger(log_dir, name="speaker_separation")
-
     # Initialize trainer
     trainer = pl.Trainer(
         max_epochs=num_epochs,
-        accelerator='gpu',        # Force CPU for now
+        accelerator='gpu',
         devices=1,
         strategy='auto',
+        precision='16-mixed',
         callbacks=[
             ModelCheckpoint(
                 dirpath=checkpoint_dir,
@@ -282,15 +280,14 @@ def train_model(
                 mode='min'
             )
         ],
-        logger=logger,
+        logger=TensorBoardLogger(log_dir, name="speaker_separation"),
         log_every_n_steps=10,
         val_check_interval=1.0,
         gradient_clip_val=1.0,
         accumulate_grad_batches=1,
-        precision='16-mixed',
         enable_progress_bar=True,
         enable_model_summary=True,
-        num_sanity_val_steps=1
+        deterministic=True
     )
 
     # Train model
