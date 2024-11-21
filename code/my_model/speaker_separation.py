@@ -13,14 +13,14 @@ class SpeakerSeparation(pl.LightningModule):
     def __init__(self, learning_rate: float = 1e-3):
         super().__init__()
 
+        self.speaker_encoder = VoiceEncoder()
+        self.speaker_encoder = self.speaker_encoder.cuda()
+
         self.ss_model = ResUNet30(
             input_channels=1,
             output_channels=1,
             condition_size=256
         )
-
-        # Initialize speaker encoder on CPU explicitly
-        self.speaker_encoder = VoiceEncoder().cpu()
 
         self.learning_rate = learning_rate
 
@@ -97,6 +97,11 @@ class SpeakerSeparation(pl.LightningModule):
             mixture = batch['mixture'].unsqueeze(1).to(self.device)
             target = batch['target'].to(self.device)
 
+            mixture.requires_grad_(True)
+            embeddings.requires_grad_(True)
+            target.requires_grad_(True)
+
+
             # Forward pass
             output_dict = self.ss_model({
                 'mixture': mixture,
@@ -131,6 +136,11 @@ class SpeakerSeparation(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         metrics = self._shared_step(batch, batch_idx, 'train')
+        loss = metrics['l1_loss']
+
+        if not loss.requires_grad:
+            loss = loss.requires_grad_(True)
+
         self.train_step_outputs.append(metrics)
         return metrics['l1_loss']
 
@@ -171,6 +181,10 @@ class SpeakerSeparation(pl.LightningModule):
         self.validation_step_outputs.clear()
 
     def configure_optimizers(self):
+        for param in self.ss_model.parameters():
+            param.requires_grad = True
+
+
         optimizer = optim.AdamW(
             self.ss_model.parameters(),
             lr=self.learning_rate,

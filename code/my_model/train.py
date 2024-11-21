@@ -303,7 +303,7 @@ def train_model(
 
 if __name__ == "__main__":
     vctk_dir = "/scratch/network/se2375/ThesisWorking/code/my_model/audio/VCTK-Corpus-0.92"
-    checkpoint_path = "None"
+    checkpoint_path = None
 
     train_model(
         vctk_dir=vctk_dir,
