@@ -117,11 +117,7 @@ class CachedVCTKDataset(Dataset):
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
 
-        # Resample if necessary
-        if sample_rate != 16000:
-            resampler = torchaudio.transforms.Resample(sample_rate, 16000)
-            waveform = resampler(waveform)
-
+        # Remove the resampling step to keep original 48kHz
         return waveform.squeeze().numpy()
 
     def __len__(self):
@@ -304,15 +300,15 @@ if __name__ == "__main__":
 
     train_model(
         vctk_dir=vctk_dir,
-        train_batch_size=32,
-        val_batch_size=32,
+        train_batch_size=16,
+        val_batch_size=16,
         num_workers=8,
         num_epochs=200,
         learning_rate=3e-4,
-        sequence_length=32000,
+        sequence_length=192000,
         checkpoint_dir="checkpoints",
         log_dir="logs",
-        max_files_per_speaker=50,
-        max_speakers=20,
+        max_files_per_speaker=172,
+        max_speakers=109,
         resume_from_checkpoint=checkpoint_path
     )
