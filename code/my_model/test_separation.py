@@ -125,9 +125,12 @@ def main():
     print("Creating mixed signal...")
     mixture, target_wav = create_mixed_signal(target_wav, noise_wav)
 
-    print("Loading model...")
-    model = SpeakerSeparation.load_from_checkpoint(CHECKPOINT_PATH)
-    model.eval()
+    checkpoint = torch.load(CHECKPOINT_PATH)
+    state_dict = {k: v for k, v in checkpoint['state_dict'].items()
+                if not k.startswith('speaker_encoder.')}
+    checkpoint['state_dict'] = state_dict
+
+    model = SpeakerSeparation.load_from_checkpoint(CHECKPOINT_PATH, state_dict=state_dict)
 
     # Move to GPU and process
     mixture_tensor = torch.from_numpy(mixture).float()
