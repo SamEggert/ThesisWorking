@@ -295,20 +295,44 @@ def train_model(
     )
 
 if __name__ == "__main__":
-    vctk_dir = "/scratch/network/se2375/ThesisWorking/code/my_model/audio/VCTK-Corpus-0.92"
-    checkpoint_path = None
+    import argparse
 
-    train_model(
-        vctk_dir=vctk_dir,
-        train_batch_size=8,
-        val_batch_size=8,
-        num_workers=8,
-        num_epochs=200,
-        learning_rate=3e-4,
-        sequence_length=192000,
-        checkpoint_dir="checkpoints",
-        log_dir="logs",
-        max_files_per_speaker=172,
-        max_speakers=109,
-        resume_from_checkpoint=checkpoint_path
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test_mode', action='store_true', help='Run in test mode with reduced parameters')
+    args = parser.parse_args()
+
+    vctk_dir = "/scratch/network/se2375/ThesisWorking/code/my_model/audio/VCTK-Corpus-0.92"
+    checkpoint_path = "/scratch/network/se2375/ThesisWorking/code/my_model/checkpoints/epoch=9-val_epoch_l1_loss=0.020.ckpt"
+
+    if args.test_mode:
+        # Test mode parameters
+        train_model(
+            vctk_dir=vctk_dir,
+            train_batch_size=4,          # Reduced batch size
+            val_batch_size=4,            # Reduced batch size
+            num_workers=8,
+            num_epochs=2,                # Reduced epochs for test
+            learning_rate=3e-4,
+            sequence_length=192000,
+            checkpoint_dir="checkpoints",
+            log_dir="logs",
+            max_files_per_speaker=10,    # Reduced files per speaker
+            max_speakers=5,              # Reduced number of speakers
+            resume_from_checkpoint=checkpoint_path
+        )
+    else:
+        # Full training parameters
+        train_model(
+            vctk_dir=vctk_dir,
+            train_batch_size=8,
+            val_batch_size=8,
+            num_workers=8,
+            num_epochs=200,
+            learning_rate=3e-4,
+            sequence_length=192000,
+            checkpoint_dir="checkpoints",
+            log_dir="logs",
+            max_files_per_speaker=172,
+            max_speakers=109,
+            resume_from_checkpoint=checkpoint_path
+        )
