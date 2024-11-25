@@ -40,7 +40,14 @@ class SpeakerSeparation(pl.LightningModule):
         """Initialize speaker encoder during setup phase"""
         if self.speaker_encoder is None:
             self.speaker_encoder = VoiceEncoder().to(self.device)
-            self.speaker_encoder.eval()  # Always in eval mode
+            self.speaker_encoder.eval()  # Already have this
+            # Add this line to freeze parameters
+            for param in self.speaker_encoder.parameters():
+                param.requires_grad = False
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+        return {k: v for k, v in state_dict.items() if not k.startswith('speaker_encoder.')}
 
     def forward(self, x):
         return self.ss_model(x)
