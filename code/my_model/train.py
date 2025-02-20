@@ -303,7 +303,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     vctk_dir = "/scratch/network/se2375/ThesisWorking/code/my_model/audio/VCTK-Corpus-0.92"
-    checkpoint_path = None
+    checkpoint_path = "checkpoints/epoch=7-val_epoch_l1_loss=0.021.ckpt"
 
     if args.test_mode:
         # Test mode parameters
