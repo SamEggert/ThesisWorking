@@ -4,6 +4,7 @@ import torch.optim as optim
 import lightning.pytorch as pl
 from resemblyzer import VoiceEncoder
 from resemblyzer.audio import preprocess_wav
+import torchaudio
 from models.resunet import ResUNet30
 import numpy as np
 import torchaudio.transforms as T
@@ -41,6 +42,7 @@ class SpeakerSeparation(pl.LightningModule):
         if self.speaker_encoder is None:
             self.speaker_encoder = VoiceEncoder().to(self.device)
             self.speaker_encoder.eval()  # Already have this
+
             # Add this line to freeze parameters
             for param in self.speaker_encoder.parameters():
                 param.requires_grad = False
@@ -55,9 +57,18 @@ class SpeakerSeparation(pl.LightningModule):
     def _get_speaker_embedding(self, wav_input):
         """Helper function to get speaker embeddings"""
         if isinstance(wav_input, str):
-            wav_data = preprocess_wav(wav_input)
+            # Load and resample if it's a file path
+            waveform, _ = torchaudio.load(wav_input)
+            if waveform.shape[0] > 1:
+                waveform = torch.mean(waveform, dim=0, keepdim=True)
+            resampler = T.Resample(orig_freq=48000, new_freq=16000)
+            wav_16k = resampler(waveform)
+            wav_data = preprocess_wav(wav_16k.squeeze().numpy(), source_sr=16000)
         else:
-            wav_data = wav_input.cpu().numpy()
+            # If it's already loaded audio data, assume it's at 48kHz
+            resampler = T.Resample(orig_freq=48000, new_freq=16000)
+            wav_16k = resampler(torch.from_numpy(wav_input).unsqueeze(0))
+            wav_data = preprocess_wav(wav_16k.squeeze().numpy(), source_sr=16000)
 
         with torch.no_grad():
             embedding = self.speaker_encoder.embed_utterance(wav_data)

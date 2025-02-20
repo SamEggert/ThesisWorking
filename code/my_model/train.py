@@ -109,15 +109,16 @@ class CachedVCTKDataset(Dataset):
         with open(cache_file, 'wb') as f:
             pickle.dump(cache_data, f)
 
+
     def _preprocess_file(self, file_path):
-        # Load and preprocess audio file
+        # Load original audio at 48kHz
         waveform, sample_rate = torchaudio.load(file_path)
 
         # Convert to mono if stereo
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
 
-        # Remove the resampling step to keep original 48kHz
+        # Keep 48kHz version for separation
         return waveform.squeeze().numpy()
 
     def __len__(self):
