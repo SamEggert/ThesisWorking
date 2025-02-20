@@ -148,9 +148,20 @@ def main():
     }
 
     # Use trainer.predict instead of manual inference
+    # Move model to GPU and eval mode
+    model = model.cuda().eval()
+
+    # Move tensors to GPU
+    mixture_tensor = mixture_tensor.cuda()
+    speaker_embedding = speaker_embedding.cuda()
+
+    # Forward pass
     with torch.no_grad():
-        predictions = trainer.predict(model, [input_dict])
-        separated_wav = predictions[0]['waveform'].squeeze().cpu().numpy()
+        output_dict = model.ss_model({
+            'mixture': mixture_tensor,
+            'condition': speaker_embedding.unsqueeze(0),
+        })
+        separated_wav = output_dict['waveform'].squeeze().cpu().numpy()
 
     metrics = calculate_metrics(separated_wav, target_wav, mixture)
     print("\nSeparation Metrics:")
